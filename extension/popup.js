@@ -16,6 +16,7 @@ async function connect() {
   await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['core.js', 'content.js'] });
   const state = await send({ type: 'state' });
   $('selection').textContent = state.selected ? `선택: ${state.selected.fingerprint.text || state.selected.fingerprint.label || state.selected.fingerprint.tag}\n${state.selected.selector}` : '선택한 버튼 없음';
+  if (state.selected?.slot) $('selection').textContent += `\n경기 확인: ${state.selected.slot.context}`;
   measured = state.sync;
   message(state.status);
   renderClock();
@@ -49,15 +50,17 @@ $('sync').addEventListener('click', () => run(async () => {
   } finally { $('sync').disabled = false; }
 }));
 $('arm').addEventListener('click', () => run(async () => {
-  await connect(); await send({ type: 'arm', time: $('time').value });
-  await chrome.storage.local.set({ targetTime: $('time').value });
+  await connect(); await send({ type: 'arm', time: $('time').value, waitForActive: $('waitActive').checked, activeLabel: $('activeLabel').value });
+  await chrome.storage.local.set({ targetTime: $('time').value, waitForActive: $('waitActive').checked, activeLabel: $('activeLabel').value });
   message('예약되었습니다. 팝업을 닫고 대상 탭을 화면에 유지하세요.');
 }));
 $('cancel').addEventListener('click', () => run(async () => { await connect(); await send({ type: 'cancel' }); message('예약을 취소했습니다.'); }));
 run(async () => {
-  const saved = await chrome.storage.local.get(['siteUrl', 'targetTime']);
+  const saved = await chrome.storage.local.get(['siteUrl', 'targetTime', 'waitForActive', 'activeLabel']);
   $('url').value = saved.siteUrl || 'https://nol.yanolja.com/ticket/genre/sports/postseason';
   if (saved.targetTime) $('time').value = saved.targetTime;
+  $('waitActive').checked = saved.waitForActive === true;
+  $('activeLabel').value = saved.activeLabel || '예매하기';
   await connect();
 });
 setInterval(renderClock, 1000);

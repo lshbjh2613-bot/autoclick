@@ -14,8 +14,10 @@ try {
   });
   context.setDefaultTimeout(15000);
   await context.route('https://nol.yanolja.com/**', async route => {
-    await route.fulfill({ status: 200, headers: { 'content-type': 'text/html', date: new Date().toUTCString(), age: '0' },
-      body: '<!doctype html><button id="reserve" onclick="window.clicks=(window.clicks||0)+1"><span>예매하기</span></button>' });
+    await route.fulfill({ status: 200, headers: { 'content-type': 'text/html; charset=utf-8', date: new Date().toUTCString(), age: '0' },
+      body: route.request().url().includes('scenario=countdown')
+        ? '<!doctype html><article id="game"><h2>2026 한국시리즈 2차전 KT vs 삼성</h2><div id="reserve"><span>남은시간 00:05</span></div></article>'
+        : '<!doctype html><button id="reserve" onclick="window.clicks=(window.clicks||0)+1"><span>예매하기</span></button>' });
   });
   const page = await context.newPage();
   await page.goto('https://nol.yanolja.com/ticket/genre/sports/postseason');
@@ -49,6 +51,37 @@ try {
   assert.equal(await page.evaluate(() => window.clicks), 1);
   assert.equal((await send({ type: 'state' })).armed, false);
   console.log('PASS: Real Chromium DOM: selection suppressed click, HEAD clock measured 5 times, reservation clicked exactly once. Extension installation and live NOL were not tested.');
+  await page.goto('https://nol.yanolja.com/ticket/genre/sports/postseason?scenario=countdown');
+  await page.evaluate(() => {
+    window.chrome.runtime = { onMessage: { addListener: listener => {
+      window.__testSend = request => new Promise(resolve => listener(request, {}, resolve));
+    } } };
+  });
+  await page.addScriptTag({ path: join(extension, 'core.js') });
+  await page.addScriptTag({ path: join(extension, 'content.js') });
+  await send({ type: 'pick' });
+  await page.locator('#reserve span').click();
+  assert.equal((await send({ type: 'state' })).selected.slot.context, '2026 한국시리즈 2차전 KT vs 삼성');
+  await send({ type: 'setSync', sync: result.sync });
+  const opening = new Date(Date.now() + result.sync.offset + 5000 + 9 * 3600000).toISOString().slice(0, 19);
+  await page.evaluate(({ opening, offset }) => {
+    const localOpening = Date.parse(opening + '+09:00') - offset;
+    const interval = setInterval(() => { document.querySelector('#reserve span').textContent = '남은시간 00:01'; }, 100);
+    setTimeout(() => {
+      clearInterval(interval);
+      const button = document.createElement('button'); button.textContent = '예매하기'; button.disabled = true;
+      button.onclick = () => { window.clicks = (window.clicks || 0) + 1; };
+      document.querySelector('#reserve').replaceWith(button);
+      setTimeout(() => { button.disabled = false; }, 200);
+    }, localOpening - Date.now() + 200);
+  }, { opening, offset: result.sync.offset });
+  const reservation = await send({ type: 'arm', time: opening, waitForActive: true });
+  assert.equal(reservation.ok, true, JSON.stringify(reservation));
+  await page.waitForFunction(() => window.clicks === 1, null, { timeout: 10000 });
+  await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(() => window.clicks), 1);
+  assert.equal((await send({ type: 'state' })).armed, false);
+  console.log('PASS: Real Chromium countdown changes text, is replaced by a disabled booking button, then enables after opening and receives exactly one click.');
 } finally {
   await context?.close();
   await rm(profile, { recursive: true, force: true });

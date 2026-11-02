@@ -5,6 +5,26 @@
   let selected = null, sync = null, timer = null, target = null, status = '버튼을 선택하세요.';
   let picking = false, outline = null, highlighted = null;
   let anchor = null, clockAnchor = null;
+  let waitForActive = false, waiting = false;
+  const clickable = 'button,a,[role="button"],input[type="submit"],input[type="button"]';
+  const normalize = value => value.replace(/\s+/g, ' ').trim();
+  function pickElement(event) {
+    let element = event.target.closest(clickable) || event.target;
+    // Track the entire countdown area so its inner span or even tag may be replaced.
+    if (/남은\s*시간/.test(core.text(element))) {
+      while (element.parentElement && !['BODY', 'HTML'].includes(element.parentElement.tagName)
+        && normalize(element.parentElement.textContent) === normalize(element.textContent)) element = element.parentElement;
+    }
+    return element;
+  }
+  const contextText = (parent, slot) => normalize([...parent.childNodes].filter(node => node !== slot).map(node => node.textContent).join(' '));
+  function captureSlot(element) {
+    const parent = element.parentElement;
+    if (!parent || ['BODY', 'HTML'].includes(parent.tagName)) return null;
+    const context = contextText(parent, element);
+    if (context.length < 4 || context.length > 1000) return null;
+    return { parent: selectorFor(parent), index: [...parent.children].indexOf(element), count: parent.children.length, context };
+  }
   const box = document.createElement('div');
   box.id = '__server_time_click_status';
   box.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:2147483647;max-width:360px;';
@@ -41,16 +61,16 @@
   function hover(event) {
     if (event.composedPath().includes(box)) return;
     restoreHighlight();
-    highlighted = event.target.closest('button,a,[role="button"],input[type="submit"],input[type="button"]') || event.target;
+    highlighted = pickElement(event);
     outline = highlighted.style.outline;
     highlighted.style.outline = '3px solid #ee4c70';
   }
   function choose(event) {
     if (event.composedPath().includes(box)) return;
     event.preventDefault(); event.stopImmediatePropagation();
-    const element = event.target.closest('button,a,[role="button"],input[type="submit"],input[type="button"]') || event.target;
+    const element = pickElement(event);
     try {
-      selected = { selector: selectorFor(element), fingerprint: core.fingerprint(element) };
+      selected = { selector: selectorFor(element), fingerprint: core.fingerprint(element), slot: captureSlot(element) };
       stopPicking(); update(`선택 완료: ${selected.fingerprint.text || selected.fingerprint.label || element.tagName}. 확장 프로그램을 다시 열어 시간을 설정하세요.`);
       if (event.type === 'pointerdown') {
         // Disabled native buttons do not emit click. Pick on pointerdown,
@@ -83,6 +103,38 @@
       throw new Error('버튼이 보이지 않아 클릭하지 않았습니다.');
     return element;
   }
+  function currentSlot() {
+    if (document.visibilityState !== 'visible') throw new Error('탭이 숨겨져 예약을 취소했습니다.');
+    if (selected.url && location.href !== selected.url) throw new Error('페이지 주소가 바뀌었습니다. 다시 선택하세요.');
+    if (!selected.slot) throw new Error('경기 제목을 확인할 수 없습니다. 개별 경기 카드의 남은시간 영역을 다시 선택하세요.');
+    const parents = document.querySelectorAll(selected.slot.parent);
+    const parent = parents[0], slot = parent?.children[selected.slot.index];
+    if (parents.length !== 1 || !slot || parent.children.length !== selected.slot.count
+      || contextText(parent, slot) !== selected.slot.context)
+      throw new Error('경기 정보나 버튼 영역의 구조가 바뀌어 중단했습니다. 다시 선택하세요.');
+    return slot;
+  }
+  function readyButton() {
+    const slot = currentSlot();
+    const candidates = [...slot.querySelectorAll(clickable)];
+    if (slot.matches(clickable)) candidates.unshift(slot);
+    // Some sites render a React onClick on a div instead of a native button.
+    if (!candidates.length) candidates.push(slot);
+    const matching = candidates.filter(element => normalize(element.textContent || element.value || element.getAttribute('aria-label') || '') === selected.activeLabel);
+    if (matching.length > 1) throw new Error('예매 버튼이 여러 개라 중단했습니다. 다시 선택하세요.');
+    const element = matching[0];
+    if (!element || element.disabled || element.matches(':disabled') || element.closest('[inert]')
+      || element.closest('[aria-disabled="true"]')) return null;
+    const style = getComputedStyle(element);
+    if (!element.getClientRects().length || style.visibility === 'hidden' || style.display === 'none'
+      || style.opacity === '0' || style.pointerEvents === 'none') return null;
+    return element;
+  }
+  function clickOnce(element, late) {
+    target = null; timer = null;
+    update(`클릭 이벤트를 1회 전달했습니다 (목표 시각 이후 ${Math.round(late)}ms). 사이트 결과를 직접 확인하세요.`);
+    element.click();
+  }
   function tick() {
     if (target === null) return;
     const now = anchor + performance.now();
@@ -90,13 +142,24 @@
     const remaining = target - now;
     if (remaining <= 0) {
       const late = -remaining;
+      if (waitForActive) {
+        if (!waiting && late > 1000) { cancel('실행이 1초 이상 지연되어 클릭하지 않았습니다.'); return; }
+        waiting = true;
+        if (late >= 10000) { cancel('10초 내 예매 버튼이 활성화되지 않아 종료했습니다.'); return; }
+        try {
+          const element = readyButton();
+          if (element) { clickOnce(element, late); return; }
+          update(`예매 버튼 활성화 대기 중 · 최대 ${Math.ceil((10000 - late) / 1000)}초 · 클릭은 1회만 실행합니다.`);
+          timer = setTimeout(tick, 20);
+        } catch (error) { cancel(error.message); }
+        return;
+      }
       target = null; timer = null;
       if (late > 1000) { update('실행이 1초 이상 지연되어 클릭하지 않았습니다.'); return; }
       try {
         const element = validate();
         // Consume the reservation before clicking, including when page handlers throw or navigate.
-        update(`클릭 이벤트를 1회 전달했습니다 (타이머 지연 ${Math.round(late)}ms). 사이트 결과를 직접 확인하세요.`);
-        element.click();
+        clickOnce(element, late);
       } catch (error) { update(error.message); }
       return;
     }
@@ -126,7 +189,12 @@
         const requested = core.parseKoreaTime(message.time);
         const remaining = requested - (Date.now() + sync.offset);
         if (remaining < 3000 || remaining > 600000) throw new Error('목표 시각은 보정된 현재 시각의 3초 뒤부터 10분 이내로 설정하세요.');
-        validate(true);
+        waitForActive = message.waitForActive === true; waiting = false;
+        if (waitForActive) {
+          selected.activeLabel = normalize(message.activeLabel || '예매하기');
+          if (selected.activeLabel.length < 2 || /남은\s*시간|\d+:\d+/.test(selected.activeLabel)) throw new Error('활성화 후 버튼 문구를 입력하세요. 예: 예매하기');
+          currentSlot();
+        } else validate(true);
         selected.url = location.href;
         clockAnchor = Date.now() - performance.now();
         anchor = clockAnchor + sync.offset; target = requested; tick();

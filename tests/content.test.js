@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 const source = name => readFileSync(new URL(`../extension/${name}.js`, import.meta.url), 'utf8');
 
-function fixture() {
-  const dom = new JSDOM('<button id="reserve"><span>예매하기</span></button>', {
+function fixture(html = '<button id="reserve"><span>예매하기</span></button>') {
+  const dom = new JSDOM(html, {
     url: 'https://nol.yanolja.com/ticket/genre/sports/postseason', runScripts: 'outside-only', pretendToBeVisual: true
   });
   const w = dom.window;
@@ -18,9 +18,14 @@ function fixture() {
   w.setInterval = () => 0;
   w.CSS = { escape: value => value };
   w.chrome = { runtime: { onMessage: { addListener: fn => { listener = fn; } } } };
-  const button = w.document.querySelector('button');
-  button.getClientRects = () => [{ width: 100, height: 30 }];
-  let clicks = 0; button.addEventListener('click', () => clicks++);
+  const button = w.document.querySelector('#reserve');
+  let clicks = 0;
+  function watch(element) {
+    element.getClientRects = () => [{ width: 100, height: 30 }];
+    element.addEventListener('click', () => clicks++);
+    return element;
+  }
+  watch(button);
   w.eval(source('core')); w.eval(source('content'));
   const send = message => { let result; listener(message, {}, response => { result = response; }); return result; };
   function select() {
@@ -28,12 +33,12 @@ function fixture() {
     button.querySelector('span').dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
   }
   function sync() { send({ type: 'setSync', sync: { offset: 2000, measuredAt: now, origin: w.location.origin } }); }
-  function arm() { return send({ type: 'arm', time: '2026-11-02T12:00:06' }); }
+  function arm(options = {}) { return send({ type: 'arm', time: '2026-11-02T12:00:06', ...options }); }
   function advance(ms, wall = ms) {
     mono += ms; now += wall;
     const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn());
   }
-  return { dom, w, button, send, select, sync, arm, advance, clicks: () => clicks };
+  return { dom, w, button, send, select, sync, arm, advance, watch, clicks: () => clicks };
 }
 test('visual selection suppresses site click; corrected timer clicks exactly once', () => {
   const f = fixture();
@@ -90,5 +95,48 @@ test('rejects missing and expired synchronization', () => {
   try {
     f.select(); assert.equal(f.arm().ok, false);
     f.sync(); f.advance(121000); assert.equal(f.arm().ok, false);
+  } finally { f.dom.window.close(); }
+});
+const countdown = '<article id="game"><h2>2026 한국시리즈 2차전 KT vs 삼성</h2><div id="reserve"><span>남은시간 24:51</span></div></article>';
+test('countdown updates and node replacement wait for an enabled booking button, then click once', () => {
+  const f = fixture(countdown);
+  try {
+    f.select(); f.sync();
+    f.button.textContent = '남은시간 00:01';
+    assert.equal(f.arm({ waitForActive: true }).ok, true);
+    f.advance(4000); assert.equal(f.clicks(), 0);
+    const ready = f.watch(f.w.document.createElement('button'));
+    ready.textContent = '예매하기'; ready.disabled = true;
+    f.button.replaceWith(ready);
+    f.advance(100); assert.equal(f.clicks(), 0);
+    ready.disabled = false;
+    f.advance(20); assert.equal(f.clicks(), 1);
+    f.advance(500); assert.equal(f.clicks(), 1);
+  } finally { f.dom.window.close(); }
+});
+for (const reason of ['timeout', 'different game', 'wrong label', 'hidden', 'cancel', 'ambiguous buttons']) {
+  test(`countdown mode refuses ${reason}`, () => {
+    const f = fixture(countdown);
+    try {
+      f.select(); f.sync(); assert.equal(f.arm({ waitForActive: true }).ok, true);
+      f.advance(4000);
+      if (reason === 'different game') f.w.document.querySelector('h2').textContent = '다른 경기';
+      if (reason === 'hidden') {
+        Object.defineProperty(f.w.document, 'visibilityState', { value: 'hidden' });
+        f.w.document.dispatchEvent(new f.w.Event('visibilitychange'));
+      }
+      if (reason === 'cancel') f.send({ type: 'cancel' });
+      if (reason === 'ambiguous buttons') f.button.innerHTML = '<button>예매하기</button><button>예매하기</button>';
+      else if (reason !== 'timeout') f.button.textContent = reason === 'wrong label' ? '상세보기' : '예매하기';
+      f.advance(20); assert.equal(f.clicks(), 0);
+      f.advance(10000); assert.equal(f.clicks(), 0);
+      assert.equal(f.send({ type: 'state' }).armed, false);
+    } finally { f.dom.window.close(); }
+  });
+}
+test('countdown mode needs a card context instead of a page-wide button search', () => {
+  const f = fixture();
+  try {
+    f.select(); f.sync(); assert.equal(f.arm({ waitForActive: true }).ok, false);
   } finally { f.dom.window.close(); }
 });
