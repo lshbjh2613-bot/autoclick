@@ -7,6 +7,7 @@
   let anchor = null, clockAnchor = null;
   let waitForActive = false, waiting = false;
   let watching = false, watchDeadline = null, observer = null, frameId = null;
+  let watchStart = null, watchClock = null;
   let gestureGuard = null;
   function clearGestureGuard() {
     if (gestureGuard) document.removeEventListener('click', gestureGuard, true);
@@ -178,6 +179,10 @@
   }
   function checkWatch() {
     if (!watching) return;
+    if (watchClock !== null && Math.abs(Date.now() - (watchClock + performance.now())) > 250) {
+      cancel('PC 시간이 변경되어 예약 감시를 취소했습니다. 시간을 확인하고 다시 설정하세요.'); return;
+    }
+    if (performance.now() < watchStart) return;
     if (performance.now() >= watchDeadline) { cancel('30분 내 활성화되지 않아 감시를 종료했습니다.'); return; }
     try {
       const element = readyButton(true);
@@ -240,11 +245,25 @@
         selected.url = location.href;
         if (selected.slot) currentSlot();
         else validate(true);
-        watchDeadline = performance.now() + 30 * 60 * 1000;
+        let delay = 0;
+        if (message.startAt) {
+          delay = core.parseKoreaTime(message.startAt) - Date.now();
+          if (delay < 1000 || delay > 24 * 3600000) throw new Error('감시 시작은 PC 현재 시각의 1초 뒤부터 24시간 이내로 설정하세요.');
+        }
+        watchStart = performance.now() + delay;
+        watchClock = delay > 0 ? Date.now() - performance.now() : null;
+        watchDeadline = watchStart + 30 * 60 * 1000;
         watching = true;
-        update('활성화 즉시 감시 중 · 최대 30분 · 이미 활성화된 버튼은 바로 1회 클릭합니다.');
+        update(delay > 0 ? `감시 시작 예약: ${message.startAt.replace('T', ' ')} 한국 시간 · PC 시계 기준 · 시작 후 최대 30분 감시`
+          : '활성화 즉시 감시 중 · 최대 30분 · 이미 활성화된 버튼은 바로 1회 클릭합니다.');
         startObserver(); checkWatch();
-        if (watching) frameId = requestAnimationFrame(frame);
+        if (watching && delay > 0) timer = setTimeout(() => {
+          timer = null;
+          update('예약 시각에 도달해 활성화 감시를 시작했습니다.');
+          checkWatch();
+          if (watching) frameId = requestAnimationFrame(frame);
+        }, delay);
+        else if (watching) frameId = requestAnimationFrame(frame);
       } else if (message.type === 'arm') {
         if (armed()) throw new Error('이미 예약 또는 감시 중입니다. 먼저 취소하세요.');
         if (!selected) throw new Error('먼저 버튼을 선택하세요.');
@@ -269,7 +288,11 @@
     } catch (error) { reply({ ok: false, error: error.message }); }
   });
   // SPA navigation must not carry a reservation to a different page.
-  setInterval(() => { if (armed() && location.href !== selected.url) cancel('페이지 주소가 변경되어 예약을 취소했습니다.'); }, 100);
+  setInterval(() => {
+    if (armed() && location.href !== selected.url) cancel('페이지 주소가 변경되어 예약을 취소했습니다.');
+    if (watching && watchClock !== null && Math.abs(Date.now() - (watchClock + performance.now())) > 250)
+      cancel('PC 시간이 변경되어 예약 감시를 취소했습니다.');
+  }, 100);
   // Animation-only visibility changes may not mutate the DOM. Checking once per
   // rendered frame is a fallback; DOM mutations trigger the observer directly.
   function frame() {

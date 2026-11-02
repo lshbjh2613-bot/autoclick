@@ -8,8 +8,10 @@
 <button id="pick">① 페이지에서 버튼 선택</button>
 <p id="selection">선택한 버튼 없음</p>
 <label for="watchLabel">감시할 버튼 문구</label><input id="watchLabel" value="예매하기">
-<p class="note">서버시간 없이 최대 30분간 활성화를 감시합니다. 이미 활성화된 버튼은 시작 즉시 클릭합니다. 오픈 전에 클릭하고 싶지 않다면 시작하지 마세요.</p>
-<button id="watch">활성화 즉시 감시 시작 (이미 활성화면 바로 클릭)</button>
+<label for="watchStart">감시 시작 예약 · 한국 시간 (비워두면 지금 시작)</label><input id="watchStart" type="datetime-local" step="1">
+<button id="after30">지금부터 30분 뒤로 설정</button><button id="clearStart">시작 예약 지우기</button>
+<p class="note">PC 시계 기준으로 24시간 이내 시작을 예약할 수 있습니다. 서버시간 측정 없이 시작 후 최대 30분 감시합니다. 이미 활성화된 버튼은 시작 시각에 바로 클릭합니다. 탭과 PC를 켜 두세요.</p>
+<button id="watch">설정한 시각에 감시 시작 (시각이 없으면 즉시)</button>
 <button id="sync">② 서버 시간 측정</button>
 <p id="clock">측정 전</p>
 <label for="time">목표 시각 · 한국 시간 (UTC+9)</label>

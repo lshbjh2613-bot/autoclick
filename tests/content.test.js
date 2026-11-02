@@ -219,3 +219,36 @@ test('scheduled wait responds to mutation immediately once target time has passe
     assert.equal(f.clicks(), 1);
   } finally { f.dom.window.close(); }
 });
+test('PC-clock watch starts 30 minutes later without sync and cannot click early', async () => {
+  const f = fixture();
+  try {
+    f.select();
+    assert.equal(f.send({ type: 'watch', startAt: '2026-11-02T12:30:00' }).ok, true);
+    f.button.setAttribute('data-update', 'before-start'); await Promise.resolve();
+    assert.equal(f.clicks(), 0);
+    f.advance(30 * 60000 - 1); f.render(); assert.equal(f.clicks(), 0);
+    f.advance(1); f.render(); assert.equal(f.clicks(), 1);
+    f.render(); assert.equal(f.clicks(), 1);
+  } finally { f.dom.window.close(); }
+});
+test('watch duration counts from scheduled start instead of reservation creation', () => {
+  const f = fixture();
+  try {
+    f.select(); f.button.disabled = true;
+    assert.equal(f.send({ type: 'watch', startAt: '2026-11-02T12:30:00' }).ok, true);
+    f.advance(31 * 60000); f.render(); assert.equal(f.send({ type: 'state' }).armed, true);
+    f.advance(29 * 60000); f.render(); assert.equal(f.send({ type: 'state' }).armed, false);
+    assert.equal(f.clicks(), 0);
+  } finally { f.dom.window.close(); }
+});
+test('PC-clock watch rejects invalid horizons and cancels on PC clock adjustment', () => {
+  const f = fixture();
+  try {
+    f.select();
+    assert.equal(f.send({ type: 'watch', startAt: '2026-11-02T11:59:59' }).ok, false);
+    assert.equal(f.send({ type: 'watch', startAt: '2026-11-03T12:00:01' }).ok, false);
+    assert.equal(f.send({ type: 'watch', startAt: '2026-11-02T12:30:00' }).ok, true);
+    f.advance(1000, 2000); f.render();
+    assert.equal(f.send({ type: 'state' }).armed, false); assert.equal(f.clicks(), 0);
+  } finally { f.dom.window.close(); }
+});

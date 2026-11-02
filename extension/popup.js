@@ -40,10 +40,12 @@ $('open').addEventListener('click', () => {
 });
 $('pick').addEventListener('click', () => run(async () => { await connect(); await send({ type: 'pick' }); window.close(); }));
 $('watch').addEventListener('click', () => run(async () => {
-  await connect(); await send({ type: 'watch', activeLabel: $('watchLabel').value });
+  await connect(); await send({ type: 'watch', activeLabel: $('watchLabel').value, startAt: $('watchStart').value });
   await chrome.storage.local.set({ watchLabel: $('watchLabel').value });
   const state = await send({ type: 'state' }); message(state.status);
 }));
+$('after30').addEventListener('click', () => { $('watchStart').value = new Date(Date.now() + 30 * 60000 + 9 * 3600000).toISOString().slice(0, 19); });
+$('clearStart').addEventListener('click', () => { $('watchStart').value = ''; });
 $('sync').addEventListener('click', () => run(async () => {
   $('sync').disabled = true; message('서버 시간을 5회 측정 중입니다…');
   try {

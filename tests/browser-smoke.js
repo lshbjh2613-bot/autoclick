@@ -108,6 +108,14 @@ try {
   assert.equal(await page.evaluate(() => window.clicks), 1);
   assert.equal((await send({ type: 'state' })).armed, false);
   console.log(`PASS: Instant mode without sync clicked before next timer task, once only. Mock-page reaction ${reaction.delay.toFixed(2)}ms (not a live-site latency guarantee).`);
+  await page.evaluate(() => { window.clicks = 0; });
+  const startAt = new Date(Date.now() + 3000 + 9 * 3600000).toISOString().slice(0, 19);
+  assert.equal((await send({ type: 'watch', startAt })).ok, true);
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(() => window.clicks), 0);
+  await page.waitForFunction(() => window.clicks === 1, null, { timeout: 5000 });
+  assert.equal((await send({ type: 'state' })).armed, false);
+  console.log('PASS: PC-clock scheduled watch without server sync did not click early and clicked once at start.');
 } finally {
   await context?.close();
   await rm(profile, { recursive: true, force: true });
