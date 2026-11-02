@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "서버 시간 예약 클릭",
-  "version": "0.4.0",
+  "version": "0.4.1",
+  "minimum_chrome_version": "118",
   "description": "페이지에서 버튼을 선택하고 사이트 응답 시간에 맞춰 한 번 클릭합니다.",
-  "permissions": ["activeTab", "scripting", "storage"],
-  "optional_permissions": ["debugger"],
+  "permissions": ["activeTab", "scripting", "storage", "debugger"],
   "host_permissions": ["https://nol.yanolja.com/*"],
   "optional_host_permissions": ["https://*/*"],
   "action": { "default_popup": "popup.html" },

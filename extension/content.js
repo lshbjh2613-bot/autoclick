@@ -10,12 +10,18 @@
   let watchStart = null, watchClock = null;
   let browserInput = false;
   let clickPending = false;
+  let preparing = false, inputReady = false, prepareEpoch = 0;
+  function releasePrepared() {
+    ++prepareEpoch;
+    if (inputReady || preparing) chrome.runtime.sendMessage({ type: 'releaseBrowserInput' }).catch(() => {});
+    inputReady = false;
+  }
   let gestureGuard = null;
   function clearGestureGuard() {
     if (gestureGuard) document.removeEventListener('click', gestureGuard, true);
     gestureGuard = null;
   }
-  const armed = () => target !== null || watching || clickPending;
+  const armed = () => target !== null || watching || clickPending || preparing;
   const clickable = 'button,a,[role="button"],input[type="submit"],input[type="button"]';
   const normalize = value => value.replace(/\s+/g, ' ').trim();
   function pickElement(event) {
@@ -50,6 +56,7 @@
   const show = () => { if (!box.isConnected) document.documentElement.append(box); };
   function cancel(message = '예약이 취소되었습니다.') {
     if (clickPending) { update('마우스 입력 전송 중입니다. 이미 전송한 입력은 취소할 수 없습니다. 중복 실행하지 마세요.'); return; }
+    releasePrepared();
     clearTimeout(timer); timer = null; target = null; watching = false;
     observer?.disconnect(); observer = null; stopPicking(); update(message);
     if (frameId !== null) cancelAnimationFrame(frameId);
@@ -171,6 +178,7 @@
     if (browserInput) {
       const token = crypto.randomUUID();
       clickPending = true;
+      inputReady = false;
       element.setAttribute('data-autoclick-target', token);
       update('브라우저 마우스 입력을 요청 중입니다. 중복 클릭하지 마세요.');
       chrome.runtime.sendMessage({ type: 'browserClick', token }).then(result => {
@@ -179,6 +187,7 @@
       }, error => update(`마우스 입력 오류: ${error.message}. 자동 재시도하지 않습니다.`))
         .finally(() => { clickPending = false; if (element.getAttribute('data-autoclick-target') === token) element.removeAttribute('data-autoclick-target'); });
     } else {
+      releasePrepared();
       update(immediate ? '일반 클릭 이벤트만 1회 전달 · 창 열림/예매 성공은 미확인입니다. 반응이 없으면 브라우저 마우스 입력 옵션을 사용하세요.'
         : `일반 클릭 이벤트만 1회 전달 (목표 시각 이후 ${Math.round(late)}ms) · 창 열림/예매 성공은 미확인입니다.`);
       element.click();
@@ -198,7 +207,7 @@
       cancel('PC 시간이 변경되어 예약 감시를 취소했습니다. 시간을 확인하고 다시 설정하세요.'); return;
     }
     if (performance.now() < watchStart) return;
-    if (performance.now() >= watchDeadline) { cancel('30분 내 활성화되지 않아 감시를 종료했습니다.'); return; }
+    if (performance.now() >= watchDeadline) { cancel('2시간 내 활성화되지 않아 감시를 종료했습니다.'); return; }
     try {
       const element = readyButton(true);
       if (element) clickOnce(element, 0);
@@ -243,7 +252,25 @@
     try {
       if (message.type === 'state') { reply({ ok: true, selected, sync, status, armed: armed() }); return; }
       show();
-      if (message.type === 'pick') {
+      if (message.type === 'prepareInput') {
+        if (armed()) throw new Error('이미 준비 또는 감시 중입니다. 먼저 취소하세요.');
+        if (!selected) throw new Error('먼저 남은시간 영역을 선택하세요.');
+        preparing = true;
+        const epoch = ++prepareEpoch;
+        update('브라우저 입력 연결을 미리 확인 중입니다…');
+        chrome.runtime.sendMessage({ type: 'prepareBrowserInput' }).then(result => {
+          if (epoch !== prepareEpoch) {
+            chrome.runtime.sendMessage({ type: 'releaseBrowserInput' }).catch(() => {});
+            throw new Error('연결 준비가 취소되었습니다.');
+          }
+          if (!result?.ok) throw new Error(result?.error || '브라우저 연결 응답 없음');
+          preparing = false; inputReady = true;
+          update('브라우저 입력 연결 준비 완료.'); reply({ ok: true });
+        }).catch(error => { preparing = false; inputReady = false; update(error.message); reply({ ok: false, error: error.message }); });
+        return true;
+      } else if (message.type === 'inputDisconnected') {
+        if (!clickPending && (inputReady || preparing)) cancel('브라우저 입력 연결이 해제되어 감시를 중단했습니다. 다시 시작하세요.');
+      } else if (message.type === 'pick') {
         cancel(); picking = true; update('원하는 버튼을 클릭하세요. 이 선택 클릭은 사이트에 전달하지 않습니다. Esc로 종료합니다.');
         document.addEventListener('mouseover', hover, true);
         document.addEventListener('pointerdown', choose, true);
@@ -256,6 +283,7 @@
         if (armed()) throw new Error('이미 예약 또는 감시 중입니다. 먼저 취소하세요.');
         if (!selected) throw new Error('먼저 버튼을 선택하세요.');
         browserInput = message.browserInput === true;
+        if (browserInput && !inputReady) throw new Error('브라우저 입력 연결 준비를 먼저 완료하세요.');
         selected.activeLabel = normalize(message.activeLabel || '예매하기');
         if (selected.activeLabel.length < 2 || /남은\s*시간|\d+:\d+/.test(selected.activeLabel)) throw new Error('활성화 후 버튼 문구를 입력하세요.');
         selected.url = location.href;
@@ -268,10 +296,10 @@
         }
         watchStart = performance.now() + delay;
         watchClock = delay > 0 ? Date.now() - performance.now() : null;
-        watchDeadline = watchStart + 30 * 60 * 1000;
+        watchDeadline = watchStart + 2 * 60 * 60 * 1000;
         watching = true;
-        update(delay > 0 ? `감시 시작 예약: ${message.startAt.replace('T', ' ')} 한국 시간 · PC 시계 기준 · 시작 후 최대 30분 감시`
-          : '활성화 즉시 감시 중 · 최대 30분 · 이미 활성화된 버튼은 바로 1회 클릭합니다.');
+        update(delay > 0 ? `감시 시작 예약: ${message.startAt.replace('T', ' ')} 한국 시간 · PC 시계 기준 · 시작 후 최대 2시간 감시`
+          : `활성화 즉시 감시 중 · 최대 2시간 · ${browserInput ? '브라우저 입력 연결 준비 완료 · ' : ''}활성화 후 1회 클릭합니다.`);
         startObserver(); checkWatch();
         if (watching && delay > 0) timer = setTimeout(() => {
           timer = null;
@@ -284,6 +312,7 @@
         if (armed()) throw new Error('이미 예약 또는 감시 중입니다. 먼저 취소하세요.');
         if (!selected) throw new Error('먼저 버튼을 선택하세요.');
         browserInput = message.browserInput === true;
+        if (browserInput && !inputReady) throw new Error('브라우저 입력 연결 준비를 먼저 완료하세요.');
         if (!sync || sync.origin !== location.origin || Date.now() - sync.measuredAt > 120000 || Date.now() < sync.measuredAt)
           throw new Error('서버 시간을 다시 측정하세요 (측정 유효 기간 2분).');
         const requested = core.parseKoreaTime(message.time);
@@ -302,7 +331,7 @@
         tick();
       } else throw new Error('지원하지 않는 요청입니다.');
       reply({ ok: true });
-    } catch (error) { reply({ ok: false, error: error.message }); }
+    } catch (error) { if (!armed()) releasePrepared(); reply({ ok: false, error: error.message }); }
   });
   // SPA navigation must not carry a reservation to a different page.
   setInterval(() => {

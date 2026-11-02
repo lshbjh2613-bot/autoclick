@@ -2,6 +2,16 @@ importScripts('core.js');
 importScripts('native-click.js');
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
+  if (message.type === 'prepareBrowserInput') {
+    prepareBrowserInput(chrome, sender).then(reply, error => reply({ ok: false, error: error.message }));
+    return true;
+  }
+  if (message.type === 'releaseBrowserInput') {
+    if (Number.isInteger(sender.tab?.id) && sender.frameId === 0)
+      releaseBrowserInput(chrome, sender.tab.id).then(() => reply({ ok: true }));
+    else reply({ ok: false });
+    return true;
+  }
   if (message.type === 'browserClick') {
     dispatchBrowserClick(chrome, sender, message).then(reply, error => reply({ ok: false, error: error.message }));
     return true;
@@ -34,4 +44,12 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     return { ...AutoClickCore.best(samples), measuredAt: Date.now(), origin: url.origin, count: samples.length };
   })().then(sync => reply({ ok: true, sync }), error => reply({ ok: false, error: error.message }));
   return true;
+});
+chrome.debugger?.onDetach?.addListener(source => {
+  if (forgetBrowserInput(chrome, source.tabId))
+    chrome.tabs.sendMessage(source.tabId, { type: 'inputDisconnected' }).catch(() => {});
+});
+chrome.tabs?.onRemoved?.addListener(tabId => { forgetBrowserInput(chrome, tabId); });
+chrome.tabs?.onUpdated?.addListener((tabId, change) => {
+  if (change.url || change.status === 'loading') releaseBrowserInput(chrome, tabId);
 });

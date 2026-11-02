@@ -31,6 +31,7 @@ function fixture(html = '<button id="reserve"><span>예매하기</span></button>
   watch(button);
   w.eval(source('core')); w.eval(source('content'));
   const send = message => { let result; listener(message, {}, response => { result = response; }); return result; };
+  const sendAsync = message => new Promise(resolve => listener(message, {}, resolve));
   function select() {
     assert.equal(send({ type: 'pick' }).ok, true);
     button.querySelector('span').dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -42,7 +43,7 @@ function fixture(html = '<button id="reserve"><span>예매하기</span></button>
     const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn());
   }
   function render() { const fn = frameCallback; frameCallback = null; fn?.(mono); }
-  return { dom, w, button, send, select, sync, arm, advance, watch, render, clicks: () => clicks };
+  return { dom, w, button, send, sendAsync, select, sync, arm, advance, watch, render, clicks: () => clicks };
 }
 test('visual selection suppresses site click; corrected timer clicks exactly once', () => {
   const f = fixture();
@@ -203,7 +204,7 @@ for (const reason of ['cancel', 'hidden', 'navigation', 'timeout', 'different ga
         f.w.document.dispatchEvent(new f.w.Event('visibilitychange'));
       }
       if (reason === 'navigation') f.w.history.pushState({}, '', '/other');
-      if (reason === 'timeout') { f.advance(30 * 60 * 1000); f.render(); }
+      if (reason === 'timeout') { f.advance(120 * 60 * 1000); f.render(); }
       if (reason === 'different game') f.w.document.querySelector('h2').textContent = '다른 경기';
       f.button.textContent = '예매하기'; await Promise.resolve();
       assert.equal(f.clicks(), 0); assert.equal(f.send({ type: 'state' }).armed, false);
@@ -237,7 +238,7 @@ test('watch duration counts from scheduled start instead of reservation creation
     f.select(); f.button.disabled = true;
     assert.equal(f.send({ type: 'watch', startAt: '2026-11-02T12:30:00' }).ok, true);
     f.advance(31 * 60000); f.render(); assert.equal(f.send({ type: 'state' }).armed, true);
-    f.advance(29 * 60000); f.render(); assert.equal(f.send({ type: 'state' }).armed, false);
+    f.advance(119 * 60000); f.render(); assert.equal(f.send({ type: 'state' }).armed, false);
     assert.equal(f.clicks(), 0);
   } finally { f.dom.window.close(); }
 });
@@ -257,8 +258,12 @@ test('browser input mode sends one request without synthetic click and does not 
   try {
     const requests = [];
     let finish;
-    f.w.chrome.runtime.sendMessage = request => { requests.push(request); return new Promise(resolve => { finish = resolve; }); };
+    f.w.chrome.runtime.sendMessage = request => {
+      if (request.type === 'prepareBrowserInput' || request.type === 'releaseBrowserInput') return Promise.resolve({ ok: true });
+      requests.push(request); return new Promise(resolve => { finish = resolve; });
+    };
     f.select();
+    assert.equal((await f.sendAsync({ type: 'prepareInput' })).ok, true);
     assert.equal(f.send({ type: 'watch', browserInput: true }).ok, true);
     assert.equal(f.clicks(), 0); assert.equal(requests.length, 1);
     assert.equal(requests[0].type, 'browserClick');
@@ -269,5 +274,23 @@ test('browser input mode sends one request without synthetic click and does not 
     assert.equal(requests.length, 1); assert.equal(f.clicks(), 0);
     assert.equal(f.button.hasAttribute('data-autoclick-target'), false);
     assert.match(f.send({ type: 'state' }).status, /자동 재시도하지 않습니다/);
+  } finally { f.dom.window.close(); }
+});
+test('input permission or connection failure stops before monitoring, not at activation', async () => {
+  const f = fixture();
+  try {
+    f.select();
+    f.w.chrome.runtime.sendMessage = async () => ({ ok: false, error: 'debugger permission denied' });
+    assert.equal((await f.sendAsync({ type: 'prepareInput' })).ok, false);
+    assert.equal(f.send({ type: 'watch', browserInput: true }).ok, false);
+    assert.equal(f.send({ type: 'state' }).armed, false); assert.equal(f.clicks(), 0);
+  } finally { f.dom.window.close(); }
+});
+test('46-minute countdown remains armed and clicks after activation inside two-hour limit', async () => {
+  const f = fixture(countdown);
+  try {
+    f.select(); assert.equal(f.send({ type: 'watch' }).ok, true);
+    f.advance(46 * 60000); f.render(); assert.equal(f.send({ type: 'state' }).armed, true);
+    f.button.textContent = '예매하기'; await Promise.resolve(); assert.equal(f.clicks(), 1);
   } finally { f.dom.window.close(); }
 });

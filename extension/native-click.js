@@ -1,15 +1,37 @@
 // Browser input is opt-in. Never retry a dispatched click automatically.
+const browserInputSessions = new WeakMap();
+const sessionsFor = api => {
+  if (!browserInputSessions.has(api)) browserInputSessions.set(api, new Map());
+  return browserInputSessions.get(api);
+};
+globalThis.forgetBrowserInput = (api, tabId) => sessionsFor(api).delete(tabId);
+globalThis.releaseBrowserInput = async (api, tabId) => {
+  if (!forgetBrowserInput(api, tabId)) return;
+  try { await api.debugger.detach({ tabId }); } catch {}
+};
+globalThis.prepareBrowserInput = async (api, sender) => {
+  if (!Number.isInteger(sender.tab?.id) || sender.frameId !== 0 || !sender.url?.startsWith('https://'))
+    throw new Error('대상 페이지에서 보낸 요청만 실행할 수 있습니다.');
+  if (!await api.permissions.contains({ permissions: ['debugger'] })) throw new Error('디버깅 권한이 없습니다. 이전 확장을 제거하고 새 버전을 다시 로드하세요.');
+  const tabId = sender.tab.id;
+  const tab = await api.tabs.get(tabId);
+  if (!tab.active || tab.url !== sender.url) throw new Error('대상 탭이나 주소가 바뀌었습니다.');
+  if (sessionsFor(api).get(tabId) === sender.url) return { ok: true };
+  await releaseBrowserInput(api, tabId);
+  await api.debugger.attach({ tabId }, '1.3');
+  sessionsFor(api).set(tabId, sender.url);
+  return { ok: true };
+};
 globalThis.dispatchBrowserClick = async (api, sender, message) => {
   if (!Number.isInteger(sender.tab?.id) || sender.frameId !== 0 || !sender.url?.startsWith('https://'))
     throw new Error('대상 페이지에서 보낸 요청만 실행할 수 있습니다.');
-  if (!await api.permissions.contains({ permissions: ['debugger'] })) throw new Error('브라우저 마우스 입력 권한을 먼저 허용하세요.');
-  if (!/^[a-f0-9-]{36}$/.test(message.token || '')) throw new Error('잘못된 버튼 식별자입니다.');
   const target = { tabId: sender.tab.id };
-  const tab = await api.tabs.get(target.tabId);
-  if (!tab.active || tab.url !== sender.url) throw new Error('대상 탭이나 주소가 바뀌었습니다.');
-  let attached = false;
   try {
-    await api.debugger.attach(target, '1.3'); attached = true;
+    if (!await api.permissions.contains({ permissions: ['debugger'] })) throw new Error('브라우저 마우스 입력 권한을 먼저 허용하세요.');
+    if (!/^[a-f0-9-]{36}$/.test(message.token || '')) throw new Error('잘못된 버튼 식별자입니다.');
+    const tab = await api.tabs.get(target.tabId);
+    if (!tab.active || tab.url !== sender.url) throw new Error('대상 탭이나 주소가 바뀌었습니다.');
+    await prepareBrowserInput(api, sender);
     const expression = `(() => {
       if (location.href !== ${JSON.stringify(sender.url)} || document.visibilityState !== 'visible') throw new Error('페이지 상태가 변경되었습니다.');
       const element = document.querySelector('[data-autoclick-target="${message.token}"]');
@@ -30,6 +52,6 @@ globalThis.dispatchBrowserClick = async (api, sender, message) => {
     await api.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', buttons: 0, clickCount: 1 });
     return { ok: true };
   } finally {
-    if (attached) { try { await api.debugger.detach(target); } catch {} }
+    await releaseBrowserInput(api, target.tabId);
   }
 };

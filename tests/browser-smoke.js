@@ -132,12 +132,12 @@ try {
     document.body.append(button); button.click();
   }, token);
   assert.equal(await page.evaluate(() => window.nativeClicks), 0);
-  let session, detached = false;
+  let session, detached = false, attachCount = 0;
   const nativeAPI = {
     permissions: { contains: async () => true },
     tabs: { get: async () => ({ active: true, url: page.url() }) },
     debugger: {
-      attach: async () => { session = await context.newCDPSession(page); detached = false; },
+      attach: async () => { session = await context.newCDPSession(page); detached = false; attachCount++; },
       sendCommand: async (target, method, params) => session.send(method, params),
       detach: async () => { await session.detach(); detached = true; }
     }
@@ -158,6 +158,47 @@ try {
   assert.equal(await page.evaluate(() => window.nativeClicks), 1);
   assert.equal(detached, true);
   console.log('PASS: Synthetic click rejected by test page; browser mouse input produced one trusted click and opened a popup with popup blocking enabled. Obstruction prevented input and debugger detached.');
+  await page.exposeFunction('nativeBridge', async request => {
+    const sender = { tab: { id: 1 }, frameId: 0, url: page.url() };
+    try {
+      if (request.type === 'prepareBrowserInput') return await prepareBrowserInput(nativeAPI, sender);
+      if (request.type === 'browserClick') return await dispatchBrowserClick(nativeAPI, sender, request);
+      if (request.type === 'releaseBrowserInput') { await releaseBrowserInput(nativeAPI, 1); return { ok: true }; }
+    } catch (error) { return { ok: false, error: error.message }; }
+  });
+  await page.goto('https://nol.yanolja.com/ticket/genre/sports/postseason?scenario=countdown');
+  await page.evaluate(() => {
+    window.chrome.runtime = {
+      sendMessage: request => window.nativeBridge(request),
+      onMessage: { addListener: listener => { window.__testSend = request => new Promise(resolve => listener(request, {}, resolve)); } }
+    };
+    document.querySelector('#reserve span').textContent = '남은시간 46:00';
+  });
+  await page.addScriptTag({ path: join(extension, 'core.js') });
+  await page.addScriptTag({ path: join(extension, 'content.js') });
+  await send({ type: 'pick' }); await page.locator('#reserve span').click();
+  const attachmentsBefore = attachCount;
+  assert.equal((await send({ type: 'prepareInput' })).ok, true);
+  assert.equal(attachCount, attachmentsBefore + 1);
+  assert.equal((await send({ type: 'watch', browserInput: true })).ok, true);
+  assert.match((await send({ type: 'state' })).status, /연결 준비 완료/);
+  assert.equal(detached, false);
+  await page.evaluate(() => {
+    window.nativeClicks = 0;
+    const button = document.createElement('button'); button.id = 'booking'; button.textContent = '예매하기'; button.disabled = true;
+    button.onclick = event => { if (event.isTrusted) { window.nativeClicks++; window.open('/checkout', '_blank'); } };
+    document.querySelector('#reserve').replaceWith(button);
+  });
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => window.nativeClicks), 0);
+  const bookingPopup = page.waitForEvent('popup');
+  await page.evaluate(() => { document.querySelector('#booking').disabled = false; });
+  const booked = await bookingPopup; await booked.waitForLoadState();
+  assert.equal(await page.evaluate(() => window.nativeClicks), 1);
+  assert.equal(attachCount, attachmentsBefore + 1);
+  assert.equal(detached, true);
+  await booked.close();
+  console.log('PASS: Countdown selection -> preconnected browser input -> replaced disabled button -> activation -> exactly one trusted click opening a popup, with no attachment at activation.');
 } finally {
   await context?.close();
   await rm(profile, { recursive: true, force: true });
