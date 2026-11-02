@@ -39,6 +39,11 @@ $('open').addEventListener('click', () => {
   }));
 });
 $('pick').addEventListener('click', () => run(async () => { await connect(); await send({ type: 'pick' }); window.close(); }));
+$('watch').addEventListener('click', () => run(async () => {
+  await connect(); await send({ type: 'watch', activeLabel: $('watchLabel').value });
+  await chrome.storage.local.set({ watchLabel: $('watchLabel').value });
+  const state = await send({ type: 'state' }); message(state.status);
+}));
 $('sync').addEventListener('click', () => run(async () => {
   $('sync').disabled = true; message('서버 시간을 5회 측정 중입니다…');
   try {
@@ -56,11 +61,12 @@ $('arm').addEventListener('click', () => run(async () => {
 }));
 $('cancel').addEventListener('click', () => run(async () => { await connect(); await send({ type: 'cancel' }); message('예약을 취소했습니다.'); }));
 run(async () => {
-  const saved = await chrome.storage.local.get(['siteUrl', 'targetTime', 'waitForActive', 'activeLabel']);
+  const saved = await chrome.storage.local.get(['siteUrl', 'targetTime', 'waitForActive', 'activeLabel', 'watchLabel']);
   $('url').value = saved.siteUrl || 'https://nol.yanolja.com/ticket/genre/sports/postseason';
   if (saved.targetTime) $('time').value = saved.targetTime;
   $('waitActive').checked = saved.waitForActive === true;
   $('activeLabel').value = saved.activeLabel || '예매하기';
+  $('watchLabel').value = saved.watchLabel || '예매하기';
   await connect();
 });
 setInterval(renderClock, 1000);

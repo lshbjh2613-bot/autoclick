@@ -6,6 +6,13 @@
   let picking = false, outline = null, highlighted = null;
   let anchor = null, clockAnchor = null;
   let waitForActive = false, waiting = false;
+  let watching = false, watchDeadline = null, observer = null, frameId = null;
+  let gestureGuard = null;
+  function clearGestureGuard() {
+    if (gestureGuard) document.removeEventListener('click', gestureGuard, true);
+    gestureGuard = null;
+  }
+  const armed = () => target !== null || watching;
   const clickable = 'button,a,[role="button"],input[type="submit"],input[type="button"]';
   const normalize = value => value.replace(/\s+/g, ' ').trim();
   function pickElement(event) {
@@ -19,11 +26,16 @@
   }
   const contextText = (parent, slot) => normalize([...parent.childNodes].filter(node => node !== slot).map(node => node.textContent).join(' '));
   function captureSlot(element) {
-    const parent = element.parentElement;
-    if (!parent || ['BODY', 'HTML'].includes(parent.tagName)) return null;
-    const context = contextText(parent, element);
-    if (context.length < 4 || context.length > 1000) return null;
-    return { parent: selectorFor(parent), index: [...parent.children].indexOf(element), count: parent.children.length, context };
+    let region = element;
+    while (region.parentElement && !['BODY', 'HTML'].includes(region.parentElement.tagName)) {
+      const parent = region.parentElement;
+      const context = contextText(parent, region);
+      if (context.length >= 4 && context.length <= 1000)
+        return { parent: selectorFor(parent), index: [...parent.children].indexOf(region), count: parent.children.length, context };
+      if (context.length) break;
+      region = parent;
+    }
+    return null;
   }
   const box = document.createElement('div');
   box.id = '__server_time_click_status';
@@ -34,7 +46,10 @@
   const update = message => { status = message; label.textContent = message; };
   const show = () => { if (!box.isConnected) document.documentElement.append(box); };
   function cancel(message = '예약이 취소되었습니다.') {
-    clearTimeout(timer); timer = null; target = null; stopPicking(); update(message);
+    clearTimeout(timer); timer = null; target = null; watching = false;
+    observer?.disconnect(); observer = null; stopPicking(); update(message);
+    if (frameId !== null) cancelAnimationFrame(frameId);
+    frameId = null;
   }
   shadow.querySelector('button').addEventListener('click', () => cancel());
   function selectorFor(element) {
@@ -75,9 +90,14 @@
       if (event.type === 'pointerdown') {
         // Disabled native buttons do not emit click. Pick on pointerdown,
         // then consume the click that an enabled button may emit on release.
-        const swallow = next => { next.preventDefault(); next.stopImmediatePropagation(); document.removeEventListener('click', swallow, true); };
+        clearGestureGuard();
+        const swallow = next => {
+          if (next.composedPath().includes(box)) return;
+          next.preventDefault(); next.stopImmediatePropagation(); clearGestureGuard();
+        };
+        gestureGuard = swallow;
         document.addEventListener('click', swallow, true);
-        setTimeout(() => document.removeEventListener('click', swallow, true), 700);
+        setTimeout(() => { if (gestureGuard === swallow) clearGestureGuard(); }, 700);
       }
     } catch (error) { update(error.message); }
   }
@@ -114,8 +134,15 @@
       throw new Error('경기 정보나 버튼 영역의 구조가 바뀌어 중단했습니다. 다시 선택하세요.');
     return slot;
   }
-  function readyButton() {
-    const slot = currentSlot();
+  function readyButton(exactFallback = false) {
+    let slot;
+    if (selected.slot) slot = currentSlot();
+    else if (exactFallback) {
+      if (document.visibilityState !== 'visible' || location.href !== selected.url) throw new Error('탭 상태나 페이지 주소가 바뀌어 중단했습니다.');
+      const elements = document.querySelectorAll(selected.selector);
+      if (elements.length !== 1 || !core.matches(elements[0], selected.fingerprint)) throw new Error('선택한 버튼이 바뀌었습니다. 다시 선택하세요.');
+      slot = elements[0];
+    } else slot = currentSlot();
     const candidates = [...slot.querySelectorAll(clickable)];
     if (slot.matches(clickable)) candidates.unshift(slot);
     // Some sites render a React onClick on a div instead of a native button.
@@ -131,9 +158,31 @@
     return element;
   }
   function clickOnce(element, late) {
-    target = null; timer = null;
-    update(`클릭 이벤트를 1회 전달했습니다 (목표 시각 이후 ${Math.round(late)}ms). 사이트 결과를 직접 확인하세요.`);
+    const immediate = watching;
+    clearTimeout(timer); target = null; timer = null; watching = false;
+    observer?.disconnect(); observer = null;
+    if (frameId !== null) cancelAnimationFrame(frameId);
+    frameId = null;
+    clearGestureGuard();
+    update(immediate ? '버튼 활성화를 확인해 클릭 이벤트를 1회 전달했습니다. 사이트 결과를 직접 확인하세요.'
+      : `클릭 이벤트를 1회 전달했습니다 (목표 시각 이후 ${Math.round(late)}ms). 사이트 결과를 직접 확인하세요.`);
     element.click();
+  }
+  function startObserver() {
+    observer?.disconnect();
+    observer = new MutationObserver(() => {
+      if (watching) checkWatch();
+      else if (target !== null && waitForActive && waiting) { clearTimeout(timer); timer = null; tick(); }
+    });
+    observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+  }
+  function checkWatch() {
+    if (!watching) return;
+    if (performance.now() >= watchDeadline) { cancel('30분 내 활성화되지 않아 감시를 종료했습니다.'); return; }
+    try {
+      const element = readyButton(true);
+      if (element) clickOnce(element, 0);
+    } catch (error) { cancel(error.message); }
   }
   function tick() {
     if (target === null) return;
@@ -150,7 +199,9 @@
           const element = readyButton();
           if (element) { clickOnce(element, late); return; }
           update(`예매 버튼 활성화 대기 중 · 최대 ${Math.ceil((10000 - late) / 1000)}초 · 클릭은 1회만 실행합니다.`);
-          timer = setTimeout(tick, 20);
+          // MutationObserver handles DOM activation without a polling delay.
+          // A periodic check also handles computed styles changed by CSS animations.
+          timer = setTimeout(tick, 250);
         } catch (error) { cancel(error.message); }
         return;
       }
@@ -166,11 +217,11 @@
     update(`예약 중 · 약 ${Math.ceil(remaining / 1000)}초 남음 · 이 탭을 화면에 유지하세요.`);
     timer = setTimeout(tick, Math.min(remaining > 1000 ? 250 : 10, remaining));
   }
-  document.addEventListener('visibilitychange', () => { if (target !== null && document.visibilityState !== 'visible') cancel('탭이 숨겨져 예약을 취소했습니다.'); });
+  document.addEventListener('visibilitychange', () => { if (armed() && document.visibilityState !== 'visible') cancel('탭이 숨겨져 예약을 취소했습니다.'); });
   window.addEventListener('pagehide', () => cancel());
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
     try {
-      if (message.type === 'state') { reply({ ok: true, selected, sync, status, armed: target !== null }); return; }
+      if (message.type === 'state') { reply({ ok: true, selected, sync, status, armed: armed() }); return; }
       show();
       if (message.type === 'pick') {
         cancel(); picking = true; update('원하는 버튼을 클릭하세요. 이 선택 클릭은 사이트에 전달하지 않습니다. Esc로 종료합니다.');
@@ -181,8 +232,21 @@
       } else if (message.type === 'cancel') cancel();
       else if (message.type === 'setSync') {
         cancel('서버 시간 측정을 적용했습니다.'); sync = message.sync;
+      } else if (message.type === 'watch') {
+        if (armed()) throw new Error('이미 예약 또는 감시 중입니다. 먼저 취소하세요.');
+        if (!selected) throw new Error('먼저 버튼을 선택하세요.');
+        selected.activeLabel = normalize(message.activeLabel || '예매하기');
+        if (selected.activeLabel.length < 2 || /남은\s*시간|\d+:\d+/.test(selected.activeLabel)) throw new Error('활성화 후 버튼 문구를 입력하세요.');
+        selected.url = location.href;
+        if (selected.slot) currentSlot();
+        else validate(true);
+        watchDeadline = performance.now() + 30 * 60 * 1000;
+        watching = true;
+        update('활성화 즉시 감시 중 · 최대 30분 · 이미 활성화된 버튼은 바로 1회 클릭합니다.');
+        startObserver(); checkWatch();
+        if (watching) frameId = requestAnimationFrame(frame);
       } else if (message.type === 'arm') {
-        if (target !== null) throw new Error('이미 예약 중입니다. 먼저 취소하세요.');
+        if (armed()) throw new Error('이미 예약 또는 감시 중입니다. 먼저 취소하세요.');
         if (!selected) throw new Error('먼저 버튼을 선택하세요.');
         if (!sync || sync.origin !== location.origin || Date.now() - sync.measuredAt > 120000 || Date.now() < sync.measuredAt)
           throw new Error('서버 시간을 다시 측정하세요 (측정 유효 기간 2분).');
@@ -197,11 +261,20 @@
         } else validate(true);
         selected.url = location.href;
         clockAnchor = Date.now() - performance.now();
-        anchor = clockAnchor + sync.offset; target = requested; tick();
+        anchor = clockAnchor + sync.offset; target = requested;
+        if (waitForActive) startObserver();
+        tick();
       } else throw new Error('지원하지 않는 요청입니다.');
       reply({ ok: true });
     } catch (error) { reply({ ok: false, error: error.message }); }
   });
   // SPA navigation must not carry a reservation to a different page.
-  setInterval(() => { if (target !== null && location.href !== selected.url) cancel('페이지 주소가 변경되어 예약을 취소했습니다.'); }, 100);
+  setInterval(() => { if (armed() && location.href !== selected.url) cancel('페이지 주소가 변경되어 예약을 취소했습니다.'); }, 100);
+  // Animation-only visibility changes may not mutate the DOM. Checking once per
+  // rendered frame is a fallback; DOM mutations trigger the observer directly.
+  function frame() {
+    frameId = null;
+    if (watching) checkWatch();
+    if (watching) frameId = requestAnimationFrame(frame);
+  }
 })();

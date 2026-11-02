@@ -11,6 +11,9 @@ function fixture(html = '<button id="reserve"><span>예매하기</span></button>
   const w = dom.window;
   let now = Date.parse('2026-11-02T03:00:00Z'), mono = 100, listener;
   const timers = new Map(); let id = 0;
+  let frameCallback = null;
+  w.requestAnimationFrame = fn => { frameCallback = fn; return 1; };
+  w.cancelAnimationFrame = () => { frameCallback = null; };
   w.Date.now = () => now;
   Object.defineProperty(w.performance, 'now', { value: () => mono });
   w.setTimeout = fn => { timers.set(++id, fn); return id; };
@@ -38,7 +41,8 @@ function fixture(html = '<button id="reserve"><span>예매하기</span></button>
     mono += ms; now += wall;
     const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn());
   }
-  return { dom, w, button, send, select, sync, arm, advance, watch, clicks: () => clicks };
+  function render() { const fn = frameCallback; frameCallback = null; fn?.(mono); }
+  return { dom, w, button, send, select, sync, arm, advance, watch, render, clicks: () => clicks };
 }
 test('visual selection suppresses site click; corrected timer clicks exactly once', () => {
   const f = fixture();
@@ -138,5 +142,80 @@ test('countdown mode needs a card context instead of a page-wide button search',
   const f = fixture();
   try {
     f.select(); f.sync(); assert.equal(f.arm({ waitForActive: true }).ok, false);
+  } finally { f.dom.window.close(); }
+});
+test('instant mode clicks an already enabled selected button without any clock sync', () => {
+  const f = fixture();
+  try {
+    f.select(); assert.equal(f.send({ type: 'watch' }).ok, true);
+    assert.equal(f.clicks(), 1); assert.equal(f.send({ type: 'state' }).armed, false);
+  } finally { f.dom.window.close(); }
+});
+test('selection gesture guard never swallows the immediate automated click', () => {
+  const f = fixture();
+  try {
+    f.send({ type: 'pick' });
+    f.button.dispatchEvent(new f.w.MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
+    assert.equal(f.clicks(), 0);
+    assert.equal(f.send({ type: 'watch' }).ok, true);
+    assert.equal(f.clicks(), 1);
+  } finally { f.dom.window.close(); }
+});
+test('instant mode responds to disabled removal in the mutation microtask without advancing timers', async () => {
+  const f = fixture();
+  try {
+    f.select(); f.button.disabled = true;
+    assert.equal(f.send({ type: 'watch' }).ok, true);
+    assert.equal(f.clicks(), 0);
+    assert.equal(f.arm().ok, false);
+    f.button.disabled = false;
+    await Promise.resolve();
+    assert.equal(f.clicks(), 1);
+    f.button.setAttribute('data-rerender', 'true'); await Promise.resolve();
+    assert.equal(f.clicks(), 1);
+  } finally { f.dom.window.close(); }
+});
+test('instant mode observes countdown node replacement inside the same game', async () => {
+  const f = fixture(countdown);
+  try {
+    f.select(); assert.equal(f.send({ type: 'watch' }).ok, true);
+    const ready = f.watch(f.w.document.createElement('button')); ready.textContent = '예매하기';
+    f.button.replaceWith(ready);
+    await Promise.resolve(); assert.equal(f.clicks(), 1);
+  } finally { f.dom.window.close(); }
+});
+test('instant mode tolerates a label-only wrapper and captures the game card', async () => {
+  const f = fixture('<article><h2>한국시리즈 4차전 삼성 vs KT</h2><aside><button id="reserve" disabled><span>예매하기</span></button></aside></article>');
+  try {
+    f.select(); assert.match(f.send({ type: 'state' }).selected.slot.context, /4차전/);
+    assert.equal(f.send({ type: 'watch' }).ok, true);
+    f.button.disabled = false; await Promise.resolve(); assert.equal(f.clicks(), 1);
+  } finally { f.dom.window.close(); }
+});
+for (const reason of ['cancel', 'hidden', 'navigation', 'timeout', 'different game']) {
+  test(`instant mode stops after ${reason}`, async () => {
+    const f = fixture(countdown);
+    try {
+      f.select(); assert.equal(f.send({ type: 'watch' }).ok, true);
+      if (reason === 'cancel') f.send({ type: 'cancel' });
+      if (reason === 'hidden') {
+        Object.defineProperty(f.w.document, 'visibilityState', { value: 'hidden' });
+        f.w.document.dispatchEvent(new f.w.Event('visibilitychange'));
+      }
+      if (reason === 'navigation') f.w.history.pushState({}, '', '/other');
+      if (reason === 'timeout') { f.advance(30 * 60 * 1000); f.render(); }
+      if (reason === 'different game') f.w.document.querySelector('h2').textContent = '다른 경기';
+      f.button.textContent = '예매하기'; await Promise.resolve();
+      assert.equal(f.clicks(), 0); assert.equal(f.send({ type: 'state' }).armed, false);
+    } finally { f.dom.window.close(); }
+  });
+}
+test('scheduled wait responds to mutation immediately once target time has passed', async () => {
+  const f = fixture(countdown);
+  try {
+    f.select(); f.sync(); assert.equal(f.arm({ waitForActive: true }).ok, true);
+    f.advance(4000);
+    f.button.textContent = '예매하기'; await Promise.resolve();
+    assert.equal(f.clicks(), 1);
   } finally { f.dom.window.close(); }
 });

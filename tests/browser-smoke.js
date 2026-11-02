@@ -15,7 +15,9 @@ try {
   context.setDefaultTimeout(15000);
   await context.route('https://nol.yanolja.com/**', async route => {
     await route.fulfill({ status: 200, headers: { 'content-type': 'text/html; charset=utf-8', date: new Date().toUTCString(), age: '0' },
-      body: route.request().url().includes('scenario=countdown')
+      body: route.request().url().includes('scenario=instant')
+        ? '<!doctype html><article id="game"><h2>한국시리즈 4차전 삼성 vs KT</h2><aside><button id="reserve" disabled onclick="window.clicks=(window.clicks||0)+1;window.clickedAt=performance.now()"><span>예매하기</span></button></aside></article>'
+        : route.request().url().includes('scenario=countdown')
         ? '<!doctype html><article id="game"><h2>2026 한국시리즈 2차전 KT vs 삼성</h2><div id="reserve"><span>남은시간 00:05</span></div></article>'
         : '<!doctype html><button id="reserve" onclick="window.clicks=(window.clicks||0)+1"><span>예매하기</span></button>' });
   });
@@ -82,6 +84,30 @@ try {
   assert.equal(await page.evaluate(() => window.clicks), 1);
   assert.equal((await send({ type: 'state' })).armed, false);
   console.log('PASS: Real Chromium countdown changes text, is replaced by a disabled booking button, then enables after opening and receives exactly one click.');
+  await page.goto('https://nol.yanolja.com/ticket/genre/sports/postseason?scenario=instant');
+  await page.evaluate(() => {
+    window.chrome.runtime = { onMessage: { addListener: listener => {
+      window.__testSend = request => new Promise(resolve => listener(request, {}, resolve));
+    } } };
+  });
+  await page.addScriptTag({ path: join(extension, 'core.js') });
+  await page.addScriptTag({ path: join(extension, 'content.js') });
+  await send({ type: 'pick' });
+  await page.locator('#reserve').dispatchEvent('pointerdown');
+  assert.equal((await send({ type: 'watch' })).ok, true);
+  assert.equal(await page.evaluate(() => window.clicks || 0), 0);
+  const reaction = await page.evaluate(async () => {
+    const activatedAt = performance.now();
+    document.querySelector('#reserve').disabled = false;
+    const clicksNextTask = await new Promise(resolve => setTimeout(() => resolve(window.clicks || 0), 0));
+    return { clicksNextTask, delay: window.clickedAt - activatedAt };
+  });
+  assert.equal(reaction.clicksNextTask, 1);
+  assert.ok(Number.isFinite(reaction.delay) && reaction.delay >= 0);
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => window.clicks), 1);
+  assert.equal((await send({ type: 'state' })).armed, false);
+  console.log(`PASS: Instant mode without sync clicked before next timer task, once only. Mock-page reaction ${reaction.delay.toFixed(2)}ms (not a live-site latency guarantee).`);
 } finally {
   await context?.close();
   await rm(profile, { recursive: true, force: true });
