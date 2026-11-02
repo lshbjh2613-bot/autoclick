@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import '../extension/native-click.js';
 
 const profile = await mkdtemp(join(tmpdir(), 'autoclick-browser-'));
 const extension = resolve('extension');
@@ -10,6 +12,7 @@ let context;
 try {
   context = await chromium.launchPersistentContext(profile, {
     executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', headless: true,
+    ignoreDefaultArgs: ['--disable-popup-blocking'],
     args: ['--no-sandbox']
   });
   context.setDefaultTimeout(15000);
@@ -116,6 +119,45 @@ try {
   await page.waitForFunction(() => window.clicks === 1, null, { timeout: 5000 });
   assert.equal((await send({ type: 'state' })).armed, false);
   console.log('PASS: PC-clock scheduled watch without server sync did not click early and clicked once at start.');
+  const token = randomUUID();
+  await page.evaluate(token => {
+    const button = document.createElement('button'); button.id = 'native-test'; button.textContent = '마우스 입력 확인';
+    button.setAttribute('data-autoclick-target', token);
+    window.nativeClicks = 0;
+    button.addEventListener('click', event => {
+      if (!event.isTrusted) return;
+      window.nativeClicks++;
+      window.open('/checkout', '_blank');
+    });
+    document.body.append(button); button.click();
+  }, token);
+  assert.equal(await page.evaluate(() => window.nativeClicks), 0);
+  let session, detached = false;
+  const nativeAPI = {
+    permissions: { contains: async () => true },
+    tabs: { get: async () => ({ active: true, url: page.url() }) },
+    debugger: {
+      attach: async () => { session = await context.newCDPSession(page); detached = false; },
+      sendCommand: async (target, method, params) => session.send(method, params),
+      detach: async () => { await session.detach(); detached = true; }
+    }
+  };
+  await page.bringToFront();
+  const popupOpened = page.waitForEvent('popup');
+  await dispatchBrowserClick(nativeAPI, { tab: { id: 1 }, frameId: 0, url: page.url() }, { token });
+  const checkout = await popupOpened;
+  await checkout.waitForLoadState();
+  assert.equal(await page.evaluate(() => window.nativeClicks), 1);
+  assert.equal(detached, true);
+  await checkout.close(); await page.bringToFront();
+  await page.evaluate(() => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:white'; document.body.append(overlay);
+  });
+  await assert.rejects(dispatchBrowserClick(nativeAPI, { tab: { id: 1 }, frameId: 0, url: page.url() }, { token }));
+  assert.equal(await page.evaluate(() => window.nativeClicks), 1);
+  assert.equal(detached, true);
+  console.log('PASS: Synthetic click rejected by test page; browser mouse input produced one trusted click and opened a popup with popup blocking enabled. Obstruction prevented input and debugger detached.');
 } finally {
   await context?.close();
   await rm(profile, { recursive: true, force: true });

@@ -8,12 +8,14 @@
   let waitForActive = false, waiting = false;
   let watching = false, watchDeadline = null, observer = null, frameId = null;
   let watchStart = null, watchClock = null;
+  let browserInput = false;
+  let clickPending = false;
   let gestureGuard = null;
   function clearGestureGuard() {
     if (gestureGuard) document.removeEventListener('click', gestureGuard, true);
     gestureGuard = null;
   }
-  const armed = () => target !== null || watching;
+  const armed = () => target !== null || watching || clickPending;
   const clickable = 'button,a,[role="button"],input[type="submit"],input[type="button"]';
   const normalize = value => value.replace(/\s+/g, ' ').trim();
   function pickElement(event) {
@@ -47,6 +49,7 @@
   const update = message => { status = message; label.textContent = message; };
   const show = () => { if (!box.isConnected) document.documentElement.append(box); };
   function cancel(message = '예약이 취소되었습니다.') {
+    if (clickPending) { update('마우스 입력 전송 중입니다. 이미 전송한 입력은 취소할 수 없습니다. 중복 실행하지 마세요.'); return; }
     clearTimeout(timer); timer = null; target = null; watching = false;
     observer?.disconnect(); observer = null; stopPicking(); update(message);
     if (frameId !== null) cancelAnimationFrame(frameId);
@@ -165,9 +168,21 @@
     if (frameId !== null) cancelAnimationFrame(frameId);
     frameId = null;
     clearGestureGuard();
-    update(immediate ? '버튼 활성화를 확인해 클릭 이벤트를 1회 전달했습니다. 사이트 결과를 직접 확인하세요.'
-      : `클릭 이벤트를 1회 전달했습니다 (목표 시각 이후 ${Math.round(late)}ms). 사이트 결과를 직접 확인하세요.`);
-    element.click();
+    if (browserInput) {
+      const token = crypto.randomUUID();
+      clickPending = true;
+      element.setAttribute('data-autoclick-target', token);
+      update('브라우저 마우스 입력을 요청 중입니다. 중복 클릭하지 마세요.');
+      chrome.runtime.sendMessage({ type: 'browserClick', token }).then(result => {
+        update(result?.ok ? '브라우저 마우스 입력 1회 전송 완료 · 예매 창 열림/예매 성공은 미확인입니다.'
+          : `마우스 입력 실패: ${result?.error || '응답 없음'}. 자동 재시도하지 않습니다.`);
+      }, error => update(`마우스 입력 오류: ${error.message}. 자동 재시도하지 않습니다.`))
+        .finally(() => { clickPending = false; if (element.getAttribute('data-autoclick-target') === token) element.removeAttribute('data-autoclick-target'); });
+    } else {
+      update(immediate ? '일반 클릭 이벤트만 1회 전달 · 창 열림/예매 성공은 미확인입니다. 반응이 없으면 브라우저 마우스 입력 옵션을 사용하세요.'
+        : `일반 클릭 이벤트만 1회 전달 (목표 시각 이후 ${Math.round(late)}ms) · 창 열림/예매 성공은 미확인입니다.`);
+      element.click();
+    }
   }
   function startObserver() {
     observer?.disconnect();
@@ -240,6 +255,7 @@
       } else if (message.type === 'watch') {
         if (armed()) throw new Error('이미 예약 또는 감시 중입니다. 먼저 취소하세요.');
         if (!selected) throw new Error('먼저 버튼을 선택하세요.');
+        browserInput = message.browserInput === true;
         selected.activeLabel = normalize(message.activeLabel || '예매하기');
         if (selected.activeLabel.length < 2 || /남은\s*시간|\d+:\d+/.test(selected.activeLabel)) throw new Error('활성화 후 버튼 문구를 입력하세요.');
         selected.url = location.href;
@@ -267,6 +283,7 @@
       } else if (message.type === 'arm') {
         if (armed()) throw new Error('이미 예약 또는 감시 중입니다. 먼저 취소하세요.');
         if (!selected) throw new Error('먼저 버튼을 선택하세요.');
+        browserInput = message.browserInput === true;
         if (!sync || sync.origin !== location.origin || Date.now() - sync.measuredAt > 120000 || Date.now() < sync.measuredAt)
           throw new Error('서버 시간을 다시 측정하세요 (측정 유효 기간 2분).');
         const requested = core.parseKoreaTime(message.time);

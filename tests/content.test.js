@@ -252,3 +252,22 @@ test('PC-clock watch rejects invalid horizons and cancels on PC clock adjustment
     assert.equal(f.send({ type: 'state' }).armed, false); assert.equal(f.clicks(), 0);
   } finally { f.dom.window.close(); }
 });
+test('browser input mode sends one request without synthetic click and does not retry a failure', async () => {
+  const f = fixture();
+  try {
+    const requests = [];
+    let finish;
+    f.w.chrome.runtime.sendMessage = request => { requests.push(request); return new Promise(resolve => { finish = resolve; }); };
+    f.select();
+    assert.equal(f.send({ type: 'watch', browserInput: true }).ok, true);
+    assert.equal(f.clicks(), 0); assert.equal(requests.length, 1);
+    assert.equal(requests[0].type, 'browserClick');
+    assert.equal(f.send({ type: 'watch', browserInput: true }).ok, false);
+    finish({ ok: false, error: 'blocked' });
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    f.button.setAttribute('data-mutation', 'later'); await Promise.resolve();
+    assert.equal(requests.length, 1); assert.equal(f.clicks(), 0);
+    assert.equal(f.button.hasAttribute('data-autoclick-target'), false);
+    assert.match(f.send({ type: 'state' }).status, /자동 재시도하지 않습니다/);
+  } finally { f.dom.window.close(); }
+});

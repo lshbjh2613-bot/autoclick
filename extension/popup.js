@@ -27,6 +27,10 @@ function renderClock() {
   $('clock').textContent = `보정 시각 ${now}\nPC 대비 ${Math.round(measured.offset)}ms · RTT ${Math.round(measured.rtt)}ms\n추정 불확실성 ±${Math.round(measured.uncertainty)}ms 이상 · ${measured.count}회 측정`;
 }
 async function run(action) { try { await action(); } catch (error) { message(error.message); } }
+async function inputPermission() {
+  if ($('browserInput').checked && !await chrome.permissions.request({ permissions: ['debugger'] }))
+    throw new Error('브라우저 마우스 입력 권한이 허용되지 않았습니다.');
+}
 $('open').addEventListener('click', () => {
   // Request optional permissions directly inside a user gesture.
   let url;
@@ -40,7 +44,8 @@ $('open').addEventListener('click', () => {
 });
 $('pick').addEventListener('click', () => run(async () => { await connect(); await send({ type: 'pick' }); window.close(); }));
 $('watch').addEventListener('click', () => run(async () => {
-  await connect(); await send({ type: 'watch', activeLabel: $('watchLabel').value, startAt: $('watchStart').value });
+  await inputPermission();
+  await connect(); await send({ type: 'watch', activeLabel: $('watchLabel').value, startAt: $('watchStart').value, browserInput: $('browserInput').checked });
   await chrome.storage.local.set({ watchLabel: $('watchLabel').value });
   const state = await send({ type: 'state' }); message(state.status);
 }));
@@ -57,7 +62,8 @@ $('sync').addEventListener('click', () => run(async () => {
   } finally { $('sync').disabled = false; }
 }));
 $('arm').addEventListener('click', () => run(async () => {
-  await connect(); await send({ type: 'arm', time: $('time').value, waitForActive: $('waitActive').checked, activeLabel: $('activeLabel').value });
+  await inputPermission();
+  await connect(); await send({ type: 'arm', time: $('time').value, waitForActive: $('waitActive').checked, activeLabel: $('activeLabel').value, browserInput: $('browserInput').checked });
   await chrome.storage.local.set({ targetTime: $('time').value, waitForActive: $('waitActive').checked, activeLabel: $('activeLabel').value });
   message('예약되었습니다. 팝업을 닫고 대상 탭을 화면에 유지하세요.');
 }));

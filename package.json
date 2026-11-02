@@ -1,10 +1,10 @@
 {
   "name": "server-time-autoclick",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node tests/core.test.js && node tests/content.test.js && node tests/background.test.js",
+    "test": "node tests/core.test.js && node tests/content.test.js && node tests/background.test.js && node tests/native-click.test.js",
     "test:browser": "node tests/browser-smoke.js"
   },
   "devDependencies": {

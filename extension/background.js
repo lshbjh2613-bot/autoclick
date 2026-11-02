@@ -1,6 +1,11 @@
 importScripts('core.js');
+importScripts('native-click.js');
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
+  if (message.type === 'browserClick') {
+    dispatchBrowserClick(chrome, sender, message).then(reply, error => reply({ ok: false, error: error.message }));
+    return true;
+  }
   if (message.type !== 'sync') return;
   (async () => {
     const url = new URL(message.url);
